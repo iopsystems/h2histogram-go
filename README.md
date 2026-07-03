@@ -118,6 +118,44 @@ The bucketing math is verified against the exact assertions from the Rust crate'
 own unit tests (`src/config.rs`), so the bucketing is guaranteed bit-identical.
 Run `go test ./...` to see for yourself.
 
+## Releasing
+
+Go has no package registry to upload to — a module **is** its Git repository, and
+"publishing" a version means pushing a [semver](https://semver.org/) tag. The
+[module proxy](https://proxy.golang.org) fetches and caches it the first time
+anyone requests that version.
+
+1. **Land your changes on `main`** via a pull request, and make sure the module
+   path in [`go.mod`](go.mod) matches the repository
+   (`github.com/iopsystems/h2histogram-go`).
+2. **Tag and push** a `vX.Y.Z` tag on `main`:
+
+   ```bash
+   git checkout main && git pull
+   git tag v0.1.0        # leading "v" is required
+   git push origin v0.1.0
+   ```
+
+   That is the entire release. Users can now:
+
+   ```bash
+   go get github.com/iopsystems/h2histogram-go@v0.1.0
+   ```
+3. **(Optional) prime the proxy and docs** so the version shows up on
+   [pkg.go.dev](https://pkg.go.dev):
+
+   ```bash
+   GOPROXY=proxy.golang.org go list -m github.com/iopsystems/h2histogram-go@v0.1.0
+   ```
+
+> **Tags are effectively immutable.** The proxy caches by version, so never move
+> or delete a published tag — cut a new one instead. Run `go vet ./...` and
+> `go test ./...` before tagging.
+>
+> **`v2` and beyond** require a `/v2` suffix on the module path (per the
+> [Go module version rules](https://go.dev/blog/v2-go-modules)); `v0`/`v1` need
+> no suffix.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
