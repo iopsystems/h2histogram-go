@@ -104,6 +104,8 @@ The same bucketing is implemented in:
 
 - [Rust](https://github.com/iopsystems/histogram) — the canonical implementation
 - [Python](https://github.com/iopsystems/h2histogram-py)
+- [Java](https://github.com/iopsystems/h2histogram-java) — full `u64` range via
+  unsigned `long` semantics
 - [JavaScript](https://github.com/iopsystems/h2histogram-js) (limited to `maxValuePower <= 53`,
   since JS numbers are 64-bit floats)
 - Go (this repository) — full `u64` range
