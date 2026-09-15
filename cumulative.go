@@ -41,32 +41,24 @@ func CumulativeFromParts(config Config, index []int, count []uint64) (*Cumulativ
 	return newCumulative(config, idx, cnt), nil
 }
 
-// CumulativeFromHistogram builds a CumulativeHistogram from a dense Histogram.
+// CumulativeFromHistogram builds a snapshot and panics if the total exceeds uint64.
+// Use CheckedToCumulative to handle overflow as an error.
 func CumulativeFromHistogram(h *Histogram) *CumulativeHistogram {
-	var index []int
-	var count []uint64
-	var running uint64
-	for i, n := range h.buckets {
-		if n != 0 {
-			running += n
-			index = append(index, i)
-			count = append(count, running)
-		}
+	c, err := h.CheckedToCumulative()
+	if err != nil {
+		panic(err)
 	}
-	return newCumulative(h.config, index, count)
+	return c
 }
 
-// CumulativeFromSparse builds a CumulativeHistogram from a SparseHistogram.
+// CumulativeFromSparse builds a snapshot and panics if the total exceeds uint64.
+// Use CheckedToCumulative to handle overflow as an error.
 func CumulativeFromSparse(s *SparseHistogram) *CumulativeHistogram {
-	index := make([]int, len(s.index))
-	copy(index, s.index)
-	cumulative := make([]uint64, len(s.count))
-	var running uint64
-	for i, n := range s.count {
-		running += n
-		cumulative[i] = running
+	c, err := s.CheckedToCumulative()
+	if err != nil {
+		panic(err)
 	}
-	return newCumulative(s.config, index, cumulative)
+	return c
 }
 
 func newCumulative(config Config, index []int, count []uint64) *CumulativeHistogram {
@@ -76,6 +68,9 @@ func newCumulative(config Config, index []int, count []uint64) *CumulativeHistog
 }
 
 func validateCumulative(config Config, index []int, count []uint64) error {
+	if err := validateConfig(config); err != nil {
+		return err
+	}
 	if len(index) != len(count) {
 		return fmt.Errorf("h2histogram: index and count must have the same length (%d != %d)", len(index), len(count))
 	}
@@ -133,11 +128,11 @@ func (c *CumulativeHistogram) computeMean() (float64, bool) {
 // Config returns the bucketing configuration.
 func (c *CumulativeHistogram) Config() Config { return c.config }
 
-// Index returns the non-zero bucket indices, ascending.
-func (c *CumulativeHistogram) Index() []int { return c.index }
+// Index returns a copy of the stored bucket indices, ascending.
+func (c *CumulativeHistogram) Index() []int { return append([]int(nil), c.index...) }
 
-// Count returns the cumulative (prefix-sum) counts aligned with Index.
-func (c *CumulativeHistogram) Count() []uint64 { return c.count }
+// Count returns a copy of the cumulative (prefix-sum) counts aligned with Index.
+func (c *CumulativeHistogram) Count() []uint64 { return append([]uint64(nil), c.count...) }
 
 // Len returns the number of stored (non-zero) buckets.
 func (c *CumulativeHistogram) Len() int { return len(c.index) }
@@ -175,45 +170,19 @@ func (c *CumulativeHistogram) findQuantilePosition(target uint64) int {
 // bucket carries the individual (non-cumulative) count. It returns a nil bucket
 // if the histogram is empty.
 func (c *CumulativeHistogram) Percentile(percentile float64) (*Bucket, error) {
-	results, err := c.Percentiles([]float64{percentile})
-	if err != nil {
+	if err := validatePercentile(percentile); err != nil {
 		return nil, err
 	}
-	if results == nil {
+	if c.TotalCount() == 0 {
 		return nil, nil
 	}
-	b := results[0].Bucket
+	b := c.percentileBucket(percentile)
 	return &b, nil
 }
 
-// Percentiles returns a PercentileResult per requested percentile, in input
-// order. Each percentile must be in [0.0, 1.0]. It returns a nil slice if
-// empty.
+// Percentiles returns results in request order.
 func (c *CumulativeHistogram) Percentiles(percentiles []float64) ([]PercentileResult, error) {
-	for _, p := range percentiles {
-		if p < 0.0 || p > 1.0 {
-			return nil, fmt.Errorf("h2histogram: percentiles must be in the range [0.0, 1.0], got %v", p)
-		}
-	}
-	if len(c.count) == 0 {
-		return nil, nil
-	}
-	total := c.count[len(c.count)-1]
-	if total == 0 {
-		return nil, nil
-	}
-
-	out := make([]PercentileResult, len(percentiles))
-	for i, p := range percentiles {
-		target := ceilCount(p, total)
-		pos := c.findQuantilePosition(target)
-		start, end := c.config.IndexToRange(c.index[pos])
-		out[i] = PercentileResult{
-			Percentile: p,
-			Bucket:     Bucket{Count: c.individualCount(pos), Start: start, End: end},
-		}
-	}
-	return out, nil
+	return c.PercentilesInto(percentiles, nil)
 }
 
 // Quantile is an alias for Percentile.
