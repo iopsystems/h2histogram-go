@@ -205,8 +205,8 @@ func TestOverflowAtEveryBucketPosition(t *testing.T) {
 		if e := a.CheckedAddAssign(b); e == nil || !reflect.DeepEqual(a.buckets, original) {
 			t.Fatal("in-place overflow", pos, e)
 		}
-		if _, e := a.Merge(b); e == nil {
-			t.Fatal("dense merge overflow", pos)
+		if _, e := CheckedSum([]*Histogram{a, b}); e == nil {
+			t.Fatal("checked dense sum overflow", pos)
 		}
 		if _, e := a.ToSparse().Merge(b.ToSparse()); e == nil {
 			t.Fatal("sparse merge overflow", pos)
@@ -334,5 +334,74 @@ func TestDrainRejectsShallowCopyAlias(t *testing.T) {
 	alias := *h
 	if err := h.DrainInto(&alias); err == nil || h.TotalCount() != 1 {
 		t.Fatal("drain accepted shared backing storage", err)
+	}
+}
+
+func TestCheckedSumRejectsZeroValueWithoutPanic(t *testing.T) {
+	if _, err := CheckedSum([]*Histogram{{}}); err == nil {
+		t.Fatal("zero-value input accepted")
+	}
+}
+
+func TestEmptyRequestsSkipOverflowingTotal(t *testing.T) {
+	h, _ := New(3, 16)
+	h.buckets[0] = math.MaxUint64
+	h.buckets[1] = 1
+	for _, q := range []interface {
+		Percentiles([]float64) ([]PercentileResult, error)
+		PercentilesInto([]float64, []PercentileResult) ([]PercentileResult, error)
+	}{h, h.ToSparse()} {
+		if out, err := q.Percentiles(nil); err != nil || len(out) != 0 {
+			t.Fatal("empty allocating query", out, err)
+		}
+		if out, err := q.PercentilesInto(nil, make([]PercentileResult, 3)); err != nil || len(out) != 0 {
+			t.Fatal("empty reused query", out, err)
+		}
+	}
+}
+
+func TestLegacyDenseArithmeticWraps(t *testing.T) {
+	a, _ := New(3, 16)
+	b, _ := New(3, 16)
+	a.buckets[10] = math.MaxUint64
+	b.buckets[10] = 1
+	merged, err := a.Merge(b)
+	if err != nil || merged.buckets[10] != 0 {
+		t.Fatal("legacy merge overflow contract", err)
+	}
+	a.buckets[11] = 1
+	down, err := a.Downsample(0)
+	if err != nil || down.TotalCount() != 0 {
+		t.Fatal("legacy downsample overflow contract", err)
+	}
+
+	if _, err := a.CheckedDownsample(0); err == nil {
+		t.Fatal("checked downsample overflow accepted")
+	}
+}
+
+func TestAllocatingBatchPreservesLargeShuffledQueryOrder(t *testing.T) {
+	h, _ := New(5, 16)
+	for v := uint64(0); v < 65536; v += 73 {
+		h.Record(v, v%13+1)
+	}
+	ps := make([]float64, 1001)
+	for i := range ps {
+		ps[i] = float64((i*479)%1001) / 1000
+	}
+	c := h.ToCumulative()
+	for _, q := range []interface {
+		Percentiles([]float64) ([]PercentileResult, error)
+	}{h, h.ToSparse()} {
+		got, err := q.Percentiles(ps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, p := range ps {
+			want, err := c.Percentile(p)
+			if err != nil || got[i].Percentile != p || got[i].Bucket != *want {
+				t.Fatal("query order/rank", i, err)
+			}
+		}
 	}
 }

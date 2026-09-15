@@ -120,14 +120,20 @@ out, err = report.PercentilesInto(requests, out)
 `CheckedAddAssign(other)` validates every bucket before changing the receiver,
 including self-addition. `CheckedSum([]*Histogram{a, a, b})` validates every
 configuration first and returns independent owned storage. Empty input is an
-error; a singleton is an independent copy. `Merge` also rejects bucket overflow.
+error; a singleton is an independent copy. The private sum output copies the
+first input, then checks and adds each remaining input in one pass. A zero-value
+`Histogram{}` is rejected with an error. Existing dense `Merge` retains wrapping
+arithmetic; use `CheckedSum` when overflow must be rejected.
 
 `Percentile` uses a direct scan for dense/sparse data and binary search for
 cumulative snapshots. `PercentilesInto(requests, dst)` is available on all three
 types and reuses the supplied result slice when capacity is sufficient. Request
 order and duplicates are preserved, NaN/infinity are rejected, and an empty
-histogram returns nil. Dense/sparse batch reporting computes the total once,
-then scans per request: O(buckets × requests), without sorting scratch or maps.
+histogram returns nil. Empty request batches return immediately, even when total
+counts would overflow. Allocating dense/sparse `Percentiles` sorts request positions
+and scans storage once: O(buckets + requests × log(requests)). Reused dense/sparse
+`PercentilesInto` computes the total once, then scans per request:
+O(buckets × requests), without sorting scratch or maps.
 Use a cumulative snapshot for large or repeated query sets. Scalar APIs return
 `*Bucket`, which may allocate; reused batch reports allocate no result storage.
 
@@ -143,7 +149,9 @@ to release spare capacity; it may allocate. Dense storage already has exact size
 Counts remain `uint64`. Recording and the legacy dense/sparse `TotalCount` retain
 modulo-2^64 arithmetic; callers must avoid overflowing a recorded bucket.
 `CheckedTotalCount` detects total overflow on dense/sparse values. Checked
-aggregation, `Merge`, and `Downsample` reject per-bucket overflow. Dense/sparse
+aggregation and new sparse/cumulative `Merge` and `Downsample` reject per-bucket
+overflow. Existing dense `Merge` and `Downsample` retain modulo-2^64 arithmetic;
+use `CheckedSum` and dense `CheckedDownsample` for checked alternatives. Dense/sparse
 storage can represent a total larger than `uint64`, but percentile reports and
 cumulative conversion reject it. `CheckedToCumulative` returns an error;
 existing `ToCumulative`, `CumulativeFromHistogram`, and `CumulativeFromSparse`

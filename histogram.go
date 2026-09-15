@@ -158,9 +158,17 @@ func (h *Histogram) checkCompatible(other *Histogram) error {
 }
 
 // Merge returns a new histogram that is the element-wise sum of h and other.
-// Both histograms must share the same configuration. Bucket overflow is rejected.
+// Both histograms must share the same configuration. Counts wrap modulo 2^64.
+// Use CheckedSum to reject bucket overflow.
 func (h *Histogram) Merge(other *Histogram) (*Histogram, error) {
-	return CheckedSum([]*Histogram{h, other})
+	if err := h.checkCompatible(other); err != nil {
+		return nil, err
+	}
+	result := NewWithConfig(h.config)
+	for i, n := range h.buckets {
+		result.buckets[i] = n + other.buckets[i]
+	}
+	return result, nil
 }
 
 // Subtract returns a new histogram that is the element-wise difference of h and
@@ -183,8 +191,17 @@ func (h *Histogram) Subtract(other *Histogram) (*Histogram, error) {
 // Downsample returns a coarser histogram with a smaller groupingPower. Every
 // step down approximately halves the number of buckets while doubling the
 // relative error. The new grouping power must be strictly less than the current
-// one.
+// one. Coalesced counts wrap modulo 2^64; use CheckedDownsample to reject overflow.
 func (h *Histogram) Downsample(groupingPower uint32) (*Histogram, error) {
+	return h.downsample(groupingPower, false)
+}
+
+// CheckedDownsample produces coarser geometry, rejecting per-bucket overflow.
+func (h *Histogram) CheckedDownsample(groupingPower uint32) (*Histogram, error) {
+	return h.downsample(groupingPower, true)
+}
+
+func (h *Histogram) downsample(groupingPower uint32, checked bool) (*Histogram, error) {
 	if groupingPower >= h.config.groupingPower {
 		return nil, errors.New("h2histogram: target grouping_power must be less than the current grouping_power")
 	}
@@ -199,8 +216,10 @@ func (h *Histogram) Downsample(groupingPower uint32) (*Histogram, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := checkAdd(result.buckets[target], count); err != nil {
-				return nil, err
+			if checked {
+				if err := checkAdd(result.buckets[target], count); err != nil {
+					return nil, err
+				}
 			}
 			result.buckets[target] += count
 		}
@@ -228,7 +247,7 @@ func (h *Histogram) Percentile(percentile float64) (*Bucket, error) {
 
 // Percentiles returns results in input order, including duplicate requests.
 func (h *Histogram) Percentiles(percentiles []float64) ([]PercentileResult, error) {
-	return h.PercentilesInto(percentiles, nil)
+	return sortedPercentiles(h.config, nil, h.buckets, percentiles)
 }
 
 // Quantile is an alias for Percentile (the crate uses "quantile").

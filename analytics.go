@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 )
 
 func validateConfig(c Config) error {
@@ -71,15 +72,23 @@ func CheckedSum(histograms []*Histogram) (*Histogram, error) {
 	if first == nil {
 		return nil, errors.New("h2histogram: nil histogram")
 	}
+	if err := validateConfig(first.config); err != nil {
+		return nil, err
+	}
 	for _, h := range histograms {
 		if err := first.checkCompatible(h); err != nil {
 			return nil, err
 		}
 	}
 	out := NewWithConfig(first.config)
-	for _, h := range histograms {
-		if err := out.CheckedAddAssign(h); err != nil {
-			return nil, err
+	copy(out.buckets, first.buckets)
+	for _, h := range histograms[1:] {
+		// The destination is private: check and add in one pass without rollback.
+		for i, n := range h.buckets {
+			if err := checkAdd(out.buckets[i], n); err != nil {
+				return nil, err
+			}
+			out.buckets[i] += n
 		}
 	}
 	return out, nil
@@ -144,6 +153,9 @@ func prepareResults(ps []float64, dst []PercentileResult) ([]PercentileResult, e
 }
 
 func scanPercentiles(config Config, index []int, count []uint64, ps []float64, dst []PercentileResult) ([]PercentileResult, error) {
+	if len(ps) == 0 {
+		return dst[:0], nil
+	}
 	// Validate before touching caller output, and compute the total only once.
 	for _, p := range ps {
 		if err := validatePercentile(p); err != nil {
@@ -358,4 +370,46 @@ func (c *CumulativeHistogram) Compact() {
 		copy(v, c.count)
 		c.count = v
 	}
+}
+
+// sortedPercentiles scans the storage once after sorting request positions.
+// The allocating API retains O(B + P log P) time and O(P) output/scratch space.
+func sortedPercentiles(config Config, index []int, count []uint64, ps []float64) ([]PercentileResult, error) {
+	if len(ps) == 0 {
+		return []PercentileResult{}, nil
+	}
+	for _, p := range ps {
+		if err := validatePercentile(p); err != nil {
+			return nil, err
+		}
+	}
+	total, err := checkedTotal(count)
+	if err != nil {
+		return nil, err
+	}
+	if total == 0 {
+		return nil, nil
+	}
+	order := make([]int, len(ps))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool { return ps[order[i]] < ps[order[j]] })
+	out := make([]PercentileResult, len(ps))
+	position := -1
+	var running uint64
+	for _, slot := range order {
+		target := ceilCount(ps[slot], total)
+		for running < target {
+			position++
+			running += count[position]
+		}
+		bucketIndex := position
+		if index != nil {
+			bucketIndex = index[position]
+		}
+		start, end := config.IndexToRange(bucketIndex)
+		out[slot] = PercentileResult{Percentile: ps[slot], Bucket: Bucket{Count: count[position], Start: start, End: end}}
+	}
+	return out, nil
 }

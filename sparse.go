@@ -126,7 +126,7 @@ func (s *SparseHistogram) Percentile(percentile float64) (*Bucket, error) {
 
 // Percentiles reports results in request order.
 func (s *SparseHistogram) Percentiles(percentiles []float64) ([]PercentileResult, error) {
-	return s.PercentilesInto(percentiles, nil)
+	return sortedPercentiles(s.config, s.index, s.count, percentiles)
 }
 
 // Equal reports whether s and other have the same configuration, indices and
