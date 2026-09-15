@@ -56,6 +56,12 @@ func NewConfig(groupingPower, maxValuePower uint32) (Config, error) {
 			groupingPower, maxValuePower)
 	}
 
+	// Config stores bucket geometry in uint32. Reject shifts and sums that
+	// would truncate that representation before any storage is allocated.
+	if groupingPower >= 31 || (uint64(maxValuePower-groupingPower+1)<<groupingPower) > uint64(^uint32(0)) || (uint64(maxValuePower-groupingPower+1)<<groupingPower) > uint64(^uint(0)>>1) {
+		return Config{}, fmt.Errorf("h2histogram: bucket geometry exceeds representable size")
+	}
+
 	// The cutoff is the point at which the linear divisions and the
 	// logarithmic subdivisions have the same width: cutoffPower = groupingPower + 1.
 	cutoffPower := groupingPower + 1
