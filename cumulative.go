@@ -252,6 +252,7 @@ func (c *CumulativeHistogram) BucketsWithQuantiles() []BucketWithQuantiles {
 }
 
 // ToDense reconstructs a dense Histogram.
+// It panics if the configuration is invalid, including for a zero-value snapshot.
 func (c *CumulativeHistogram) ToDense() *Histogram {
 	h := NewWithConfig(c.config)
 	for i := range c.index {

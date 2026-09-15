@@ -156,16 +156,32 @@ storage can represent a total larger than `uint64`, but percentile reports and
 cumulative conversion reject it. `CheckedToCumulative` returns an error;
 existing `ToCumulative`, `CumulativeFromHistogram`, and `CumulativeFromSparse`
 signatures instead panic on overflow, so wrapped prefixes are never constructed.
+Use `CheckedToCumulative` for imported or otherwise untrusted counts and handle
+its error before querying the snapshot. This intentionally differs from Rust
+histogram v1.6.0, whose cumulative conversion wraps and whose dense/sparse
+percentile queries widen totals to `u128`. Go reports reject totals above
+`math.MaxUint64`, including totals that Rust can query successfully.
 Percentile ranks use floating-point multiplication, with endpoints clamped to
-the valid uint64 total; interior ranks retain floating-point rounding.
+the valid uint64 total; interior ranks retain floating-point rounding. Exact
+integer or `u128` rank arithmetic is not promised.
 
 Constructors validate geometry and imported slice shapes/order/ranges.
 `NewWithConfig` panics on invalid configuration (including `Config{}`), and
 `NewConfig` rejects geometry that cannot fit its bucket-index representation.
+Sparse/cumulative `ToDense` also panics on an invalid configuration, including a
+zero-value snapshot. Dense `Merge` and `Subtract` return an error for invalid
+configurations; zero-value dense `Downsample` already returns an error.
 Sparse imports omit zero counts. Cumulative imports retain compatibility with
 non-decreasing prefixes; `ToSparse` omits their zero individual deltas.
+This normalization can change `Len` and structural `Equal` results when
+round-tripping imported columns containing explicit zeros, while preserving
+the represented observations.
 Snapshot `Index()` and `Count()` getters return independent copies to protect
 invariants and cached means. Dense `Buckets()` remains a mutable alias.
+
+New sparse/cumulative operations deliberately reject overflow even where Rust
+v1.6.0 sparse downsampling wraps. See [CHANGELOG.md](CHANGELOG.md) for the breaking
+changes from v0.1.0 and migration guidance.
 
 Dense recording, snapshots, drains, and in-place addition are **not concurrent**:
 callers must synchronize shared access. Read-only snapshots can be shared after

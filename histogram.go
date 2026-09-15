@@ -159,9 +159,13 @@ func (h *Histogram) checkCompatible(other *Histogram) error {
 
 // Merge returns a new histogram that is the element-wise sum of h and other.
 // Both histograms must share the same configuration. Counts wrap modulo 2^64.
+// Invalid configurations, including zero-value histograms, return an error.
 // Use CheckedSum to reject bucket overflow.
 func (h *Histogram) Merge(other *Histogram) (*Histogram, error) {
 	if err := h.checkCompatible(other); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(h.config); err != nil {
 		return nil, err
 	}
 	result := NewWithConfig(h.config)
@@ -173,9 +177,12 @@ func (h *Histogram) Merge(other *Histogram) (*Histogram, error) {
 
 // Subtract returns a new histogram that is the element-wise difference of h and
 // other. It returns an error if any bucket would go negative or the configs
-// differ.
+// differ or are invalid (including zero-value histograms).
 func (h *Histogram) Subtract(other *Histogram) (*Histogram, error) {
 	if err := h.checkCompatible(other); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(h.config); err != nil {
 		return nil, err
 	}
 	result := NewWithConfig(h.config)

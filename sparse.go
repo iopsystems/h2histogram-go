@@ -97,6 +97,7 @@ func (s *SparseHistogram) Buckets() []Bucket {
 }
 
 // ToDense converts to a dense Histogram.
+// It panics if the configuration is invalid, including for a zero-value snapshot.
 func (s *SparseHistogram) ToDense() *Histogram {
 	h := NewWithConfig(s.config)
 	for k, i := range s.index {
