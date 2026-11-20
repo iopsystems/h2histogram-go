@@ -35,7 +35,11 @@ func New(groupingPower, maxValuePower uint32) (*Histogram, error) {
 }
 
 // NewWithConfig creates an empty histogram from an existing Config.
+// It panics for an invalid Config, including its zero value.
 func NewWithConfig(config Config) *Histogram {
+	if err := validateConfig(config); err != nil {
+		panic(err)
+	}
 	return &Histogram{
 		config:  config,
 		buckets: make([]uint64, config.TotalBuckets()),
@@ -67,7 +71,8 @@ func (h *Histogram) Buckets() []uint64 { return h.buckets }
 // Len returns the number of buckets.
 func (h *Histogram) Len() int { return len(h.buckets) }
 
-// TotalCount returns the total number of observations recorded.
+// TotalCount returns the total number of observations recorded, modulo 2^64.
+// Use CheckedTotalCount when the total may exceed uint64.
 func (h *Histogram) TotalCount() uint64 {
 	var total uint64
 	for _, c := range h.buckets {
@@ -82,7 +87,8 @@ func (h *Histogram) Increment(value uint64) error {
 	return h.Record(value, 1)
 }
 
-// Record adds count observations of value. It returns an error if value is out
+// Record adds count observations of value, with uint64 wrapping on overflow.
+// It returns an error if value is out
 // of range for the histogram.
 func (h *Histogram) Record(value, count uint64) error {
 	index, err := h.config.ValueToIndex(value)
@@ -145,30 +151,38 @@ func (h *Histogram) NonzeroBuckets() []Bucket {
 // Combination -------------------------------------------------------------
 
 func (h *Histogram) checkCompatible(other *Histogram) error {
-	if h.config != other.config {
+	if other == nil || h.config != other.config {
 		return errors.New("h2histogram: histograms have incompatible configurations")
 	}
 	return nil
 }
 
 // Merge returns a new histogram that is the element-wise sum of h and other.
-// Both histograms must share the same configuration.
+// Both histograms must share the same configuration. Counts wrap modulo 2^64.
+// Invalid configurations, including zero-value histograms, return an error.
+// Use CheckedSum to reject bucket overflow.
 func (h *Histogram) Merge(other *Histogram) (*Histogram, error) {
 	if err := h.checkCompatible(other); err != nil {
 		return nil, err
 	}
+	if err := validateConfig(h.config); err != nil {
+		return nil, err
+	}
 	result := NewWithConfig(h.config)
-	for i := range h.buckets {
-		result.buckets[i] = h.buckets[i] + other.buckets[i]
+	for i, n := range h.buckets {
+		result.buckets[i] = n + other.buckets[i]
 	}
 	return result, nil
 }
 
 // Subtract returns a new histogram that is the element-wise difference of h and
 // other. It returns an error if any bucket would go negative or the configs
-// differ.
+// differ or are invalid (including zero-value histograms).
 func (h *Histogram) Subtract(other *Histogram) (*Histogram, error) {
 	if err := h.checkCompatible(other); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(h.config); err != nil {
 		return nil, err
 	}
 	result := NewWithConfig(h.config)
@@ -184,8 +198,17 @@ func (h *Histogram) Subtract(other *Histogram) (*Histogram, error) {
 // Downsample returns a coarser histogram with a smaller groupingPower. Every
 // step down approximately halves the number of buckets while doubling the
 // relative error. The new grouping power must be strictly less than the current
-// one.
+// one. Coalesced counts wrap modulo 2^64; use CheckedDownsample to reject overflow.
 func (h *Histogram) Downsample(groupingPower uint32) (*Histogram, error) {
+	return h.downsample(groupingPower, false)
+}
+
+// CheckedDownsample produces coarser geometry, rejecting per-bucket overflow.
+func (h *Histogram) CheckedDownsample(groupingPower uint32) (*Histogram, error) {
+	return h.downsample(groupingPower, true)
+}
+
+func (h *Histogram) downsample(groupingPower uint32, checked bool) (*Histogram, error) {
 	if groupingPower >= h.config.groupingPower {
 		return nil, errors.New("h2histogram: target grouping_power must be less than the current grouping_power")
 	}
@@ -196,9 +219,16 @@ func (h *Histogram) Downsample(groupingPower uint32) (*Histogram, error) {
 	for index, count := range h.buckets {
 		if count != 0 {
 			value := h.config.IndexToLowerBound(index)
-			if err := result.Record(value, count); err != nil {
+			target, err := result.config.ValueToIndex(value)
+			if err != nil {
 				return nil, err
 			}
+			if checked {
+				if err := checkAdd(result.buckets[target], count); err != nil {
+					return nil, err
+				}
+			}
+			result.buckets[target] += count
 		}
 	}
 	return result, nil
@@ -211,63 +241,20 @@ func (h *Histogram) Downsample(groupingPower uint32) (*Histogram, error) {
 // percentile is out of range. percentile uses the same fractional convention as
 // the Rust crate: 0.5 is the median.
 func (h *Histogram) Percentile(percentile float64) (*Bucket, error) {
-	results, err := h.Percentiles([]float64{percentile})
-	if err != nil {
+	if err := validatePercentile(percentile); err != nil {
 		return nil, err
 	}
-	if results == nil {
-		return nil, nil
+	total, err := h.CheckedTotalCount()
+	if err != nil || total == 0 {
+		return nil, err
 	}
-	b := results[0].Bucket
+	b := scanBucket(h.config, nil, h.buckets, ceilCount(percentile, total))
 	return &b, nil
 }
 
-// Percentiles returns a PercentileResult for each requested percentile, in the
-// same order as the input. Each percentile must be in [0.0, 1.0]. It returns a
-// nil slice if the histogram is empty. This mirrors the algorithm used by the
-// Rust crate.
+// Percentiles returns results in input order, including duplicate requests.
 func (h *Histogram) Percentiles(percentiles []float64) ([]PercentileResult, error) {
-	for _, p := range percentiles {
-		if p < 0.0 || p > 1.0 {
-			return nil, fmt.Errorf("h2histogram: percentiles must be in the range [0.0, 1.0], got %v", p)
-		}
-	}
-
-	total := h.TotalCount()
-	if total == 0 {
-		return nil, nil
-	}
-
-	// Deduplicate and sort while remembering the original order for output.
-	sortedUnique := sortedUniqueFloats(percentiles)
-
-	resultsByP := make(map[float64]Bucket, len(sortedUnique))
-	bucketIdx := 0
-	partialSum := h.buckets[0]
-
-	for _, p := range sortedUnique {
-		target := ceilCount(p, total)
-		for {
-			if partialSum >= target {
-				start, end := h.config.IndexToRange(bucketIdx)
-				resultsByP[p] = Bucket{Count: h.buckets[bucketIdx], Start: start, End: end}
-				break
-			}
-			if bucketIdx == len(h.buckets)-1 {
-				start, end := h.config.IndexToRange(bucketIdx)
-				resultsByP[p] = Bucket{Count: h.buckets[bucketIdx], Start: start, End: end}
-				break
-			}
-			bucketIdx++
-			partialSum += h.buckets[bucketIdx]
-		}
-	}
-
-	out := make([]PercentileResult, len(percentiles))
-	for i, p := range percentiles {
-		out[i] = PercentileResult{Percentile: p, Bucket: resultsByP[p]}
-	}
-	return out, nil
+	return sortedPercentiles(h.config, nil, h.buckets, percentiles)
 }
 
 // Quantile is an alias for Percentile (the crate uses "quantile").
@@ -283,6 +270,7 @@ func (h *Histogram) ToSparse() *SparseHistogram {
 }
 
 // ToCumulative converts to a read-only cumulative histogram for fast quantiles.
+// It panics on total overflow; use CheckedToCumulative for an error instead.
 func (h *Histogram) ToCumulative() *CumulativeHistogram {
 	return CumulativeFromHistogram(h)
 }
@@ -310,29 +298,16 @@ func (h *Histogram) String() string {
 // ceilCount computes max(1, ceil(p*total)) matching the Rust crate's
 // max(1, (q*total).ceil() as u128).
 func ceilCount(p float64, total uint64) uint64 {
-	target := uint64(math.Ceil(p * float64(total)))
-	if target < 1 {
+	if p >= 1 {
+		return total
+	}
+	value := math.Ceil(p * float64(total))
+	// float64 rounds MaxUint64 to 2^64; never convert that out-of-range value.
+	if value >= float64(total) {
+		return total
+	}
+	if value < 1 {
 		return 1
 	}
-	return target
-}
-
-// sortedUniqueFloats returns the sorted, de-duplicated set of the inputs.
-func sortedUniqueFloats(values []float64) []float64 {
-	seen := make(map[float64]struct{}, len(values))
-	var out []float64
-	for _, v := range values {
-		if _, ok := seen[v]; !ok {
-			seen[v] = struct{}{}
-			out = append(out, v)
-		}
-	}
-	// Simple insertion sort keeps this dependency-free; the number of distinct
-	// percentiles is always tiny.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j-1] > out[j]; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
-		}
-	}
-	return out
+	return uint64(value)
 }

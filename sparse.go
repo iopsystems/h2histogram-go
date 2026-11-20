@@ -29,8 +29,11 @@ func SparseFromHistogram(h *Histogram) *SparseHistogram {
 
 // SparseFromParts creates a sparse histogram from raw parts, validating
 // invariants. It returns an error if the lengths differ, an index is out of
-// range, or the indices are not strictly ascending.
+// range, or the indices are not strictly ascending. Zero counts are omitted.
 func SparseFromParts(config Config, index []int, count []uint64) (*SparseHistogram, error) {
+	if err := validateConfig(config); err != nil {
+		return nil, err
+	}
 	if len(index) != len(count) {
 		return nil, fmt.Errorf("h2histogram: index and count must have the same length (%d != %d)", len(index), len(count))
 	}
@@ -49,17 +52,24 @@ func SparseFromParts(config Config, index []int, count []uint64) (*SparseHistogr
 	copy(idx, index)
 	cnt := make([]uint64, len(count))
 	copy(cnt, count)
-	return &SparseHistogram{config: config, index: idx, count: cnt}, nil
+	out := &SparseHistogram{config: config}
+	for k, n := range cnt {
+		if n != 0 {
+			out.index = append(out.index, idx[k])
+			out.count = append(out.count, n)
+		}
+	}
+	return out, nil
 }
 
 // Config returns the bucketing configuration.
 func (s *SparseHistogram) Config() Config { return s.config }
 
-// Index returns the non-zero bucket indices, ascending.
-func (s *SparseHistogram) Index() []int { return s.index }
+// Index returns a copy of the non-zero bucket indices, ascending.
+func (s *SparseHistogram) Index() []int { return append([]int(nil), s.index...) }
 
-// Count returns the counts corresponding to Index.
-func (s *SparseHistogram) Count() []uint64 { return s.count }
+// Count returns a copy of the counts corresponding to Index.
+func (s *SparseHistogram) Count() []uint64 { return append([]uint64(nil), s.count...) }
 
 // Len returns the number of stored (non-zero) buckets.
 func (s *SparseHistogram) Len() int { return len(s.index) }
@@ -67,7 +77,7 @@ func (s *SparseHistogram) Len() int { return len(s.index) }
 // IsEmpty reports whether the histogram has no stored buckets.
 func (s *SparseHistogram) IsEmpty() bool { return len(s.index) == 0 }
 
-// TotalCount returns the total number of observations.
+// TotalCount returns the total modulo 2^64. Use CheckedTotalCount to reject overflow.
 func (s *SparseHistogram) TotalCount() uint64 {
 	var total uint64
 	for _, c := range s.count {
@@ -87,6 +97,7 @@ func (s *SparseHistogram) Buckets() []Bucket {
 }
 
 // ToDense converts to a dense Histogram.
+// It panics if the configuration is invalid, including for a zero-value snapshot.
 func (s *SparseHistogram) ToDense() *Histogram {
 	h := NewWithConfig(s.config)
 	for k, i := range s.index {
@@ -96,18 +107,27 @@ func (s *SparseHistogram) ToDense() *Histogram {
 }
 
 // ToCumulative converts to a read-only CumulativeHistogram.
+// It panics on total overflow; use CheckedToCumulative for an error instead.
 func (s *SparseHistogram) ToCumulative() *CumulativeHistogram {
 	return CumulativeFromSparse(s)
 }
 
-// Percentile computes a percentile via the dense representation.
+// Percentile scans the stored buckets directly.
 func (s *SparseHistogram) Percentile(percentile float64) (*Bucket, error) {
-	return s.ToDense().Percentile(percentile)
+	if err := validatePercentile(percentile); err != nil {
+		return nil, err
+	}
+	total, err := s.CheckedTotalCount()
+	if err != nil || total == 0 {
+		return nil, err
+	}
+	b := scanBucket(s.config, s.index, s.count, ceilCount(percentile, total))
+	return &b, nil
 }
 
-// Percentiles computes percentiles via the dense representation.
+// Percentiles reports results in request order.
 func (s *SparseHistogram) Percentiles(percentiles []float64) ([]PercentileResult, error) {
-	return s.ToDense().Percentiles(percentiles)
+	return sortedPercentiles(s.config, s.index, s.count, percentiles)
 }
 
 // Equal reports whether s and other have the same configuration, indices and
